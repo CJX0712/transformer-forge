@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>transformer-forge · 从零手写 mini-Transformer/GPT 实验室</title>
+<style>
+  :root{ --bg:#f6f7f9; --panel:#fff; --ink:#1f2330; --muted:#6b7280; --line:#e3e6ea;
+    --accent:#2563eb; --ok:#16a34a; --warn:#d97706; }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--ink)}
+  header{background:linear-gradient(120deg,#0f172a,#1e3a8a);color:#fff;padding:18px 22px}
+  header h1{margin:0;font-size:18px;letter-spacing:.3px}
+  header p{margin:4px 0 0;color:#c7d2fe;font-size:12.5px}
+  .wrap{max-width:1080px;margin:18px auto;padding:0 16px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+  label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+  input,select{font:13px/1.4 inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+  button{font:14px/1 inherit;padding:9px 16px;border:0;border-radius:9px;background:var(--accent);color:#fff;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .stat{font-size:12px;color:var(--muted)} .stat b{color:var(--ink);font-size:14px}
+  table{border-collapse:collapse;width:100%;font-size:12.5px}
+  th,td{border:1px solid var(--line);padding:5px 8px;text-align:center}
+  th{background:#f1f5f9;color:var(--muted)}
+  canvas{background:#fff;border:1px solid var(--line);border-radius:8px;display:block}
+  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;background:#eef2ff;color:#3730a3}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .muted{color:var(--muted)}
+  pre{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;font-size:12px}
+  .note{font-size:12px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>transformer-forge <span class="tag">forge #14</span></h1>
+  <p>从零手写的 mini-Transformer / GPT — 因果多头自注意力 + 位置编码 + FFN + 交叉熵，零依赖、可在浏览器内训练、可在 Node 无头自检</p>
+</header>
+<div class="wrap">
+  <div class="panel">
+    <div class="grid">
+      <label>数据集 / 任务
+        <select id="inpTask">
+          <option value="shift">shift（预测上一个 token，练注意力）</option>
+          <option value="copy">copy（恒等映射，基线）</option>
+        </select>
+      </label>
+      <label>词表大小 V <input type="number" id="inpVocab" value="4" min="2" max="12" step="1"></label>
+      <label>序列长度 T <input type="number" id="inpT" value="8" min="3" max="16" step="1"></label>
+      <label>d_model <input type="number" id="inpD" value="20" min="6" max="48" step="2"></label>
+      <label>层数 <input type="number" id="inpL" value="1" min="1" max="3" step="1"></label>
+      <label>训练步数 <input type="number" id="inpSteps" value="1200" min="100" max="20000" step="100"></label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnTrain">训练并评估</button>
+      <button id="btnDemo">注意力热力图演示</button>
+      <span class="stat" id="stat">就绪</span>
+    </div>
+    <div class="note">shift 任务：position i 的目标 = 上一个 token（i=0 为常数 0）。训练后测试集精度应 ≥ 95%，证明模型真的学会了跨位置注意。引擎全部手算，无外部库。</div>
+  </div>
+  <div class="panel">
+    <div class="row"><span class="stat">loss：<b id="loss">—</b></span>
+      <span class="stat">测试精度：<b id="acc">—</b></span>
+      <span class="stat">步：<b id="step">—</b> / <span id="stepTot">—</span></span></div>
+    <canvas id="cv" width="640" height="240"></canvas>
+    <div class="note" id="cvNote">注意力权重热力图（行=query i，列=key j；因果掩码下三角外应为 0；shift 任务应集中在 (i, i−1) 形成下对角带）。</div>
+  </div>
+  <div class="panel">
+    <h3 style="margin:0 0 8px">样本预测（测试集，argmax）</h3>
+    <div id="predTable"></div>
+  </div>
+  <div class="panel">
+    <h3 style="margin:0 0 8px">引擎自检（浏览器端）</h3>
+    <pre id="selftest">点击「训练并评估」后自动运行梯度检验等不变量…</pre>
+  </div>
+</div>
+
+<script id="engine">
+(function(){
+  "use strict";
+  // ---------- 基础工具 ----------
+  function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+  function gaussFactory(rng){ let s=0,has=false; return function(){ if(has){has=false;return s;} let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); const m=Math.sqrt(-2*Math.log(u)); s=m*Math.sin(2*Math.PI*v); has=true; return m*Math.cos(2*Math.PI*v); }; }
+  function matVec(W,x,rows,cols,out){ for(let r=0;r<rows;r++){ let s=0; const off=r*cols; for(let c=0;c<cols;c++) s+=W[off+c]*x[c]; out[r]=s; } }
+  function outerAdd(W,x,dy,rows,cols){ for(let r=0;r<rows;r++){ const xv=x[r], ro=r*cols; for(let c=0;c<cols;c++) W[ro+c]+=xv*dy[c]; } }
+  // 转置乘：out[c]=Σ_r W[r*cols+c]*x[r]  （用于反向：dConcat=Woᵀ·dOut, da=Wqᵀ·dQ+…）
+  function matVecT(W,x,rows,cols,out){ for(let c=0;c<cols;c++){ let s=0; for(let r=0;r<rows;r++) s+=W[r*cols+c]*x[r]; out[c]=s; } }
+  function softmaxRow(a,off,n){ let mx=-Infinity; for(let j=0;j<n;j++) if(a[off+j]>mx)mx=a[off+j]; let s=0; for(let j=0;j<n;j++){ const e=Math.exp(a[off+j]-mx); a[off+j]=e; s+=e; } const inv=1/s; for(let j=0;j<n;j++) a[off+j]*=inv; }
+
+  // ---------- 层归一（按行，含反向） ----------
+  function layernormRows(x,T,d,gamma,beta){
+    const y=new Float64Array(T*d), mu=new Float64Array(T), inv=new Float64Array(T);
+    for(let r=0;r<T;r++){ let mm=0; const ro=r*d; for(let i=0;i<d;i++) mm+=x[ro+i]; mm/=d; let v=0; for(let i=0;i<d;i++){ const z=x[ro+i]-mm; v+=z*z; } v/=d; const sig=Math.sqrt(v+1e-5); const isig=1/sig; mu[r]=mm; inv[r]=isig; for(let i=0;i<d;i++) y[ro+i]=gamma[i]*((x[ro+i]-mm)*isig)+beta[i]; }
+    return {y,mu,inv};
+  }
+  function layernormBackward(x,gamma,d,dY,T,mu,inv,dg,db){
+    const dx=new Float64Array(T*d);
+    for(let r=0;r<T;r++){ const ro=r*d, m=mu[r], isig=inv[r]; const xh=new Float64Array(d);
+      for(let i=0;i<d;i++) xh[i]=(x[ro+i]-m)*isig;
+      let ds=0,dm=0; for(let i=0;i<d;i++){ const dxh=dY[ro+i]*gamma[i]; ds+=dxh*xh[i]; dm+=dxh; }
+      ds*=-0.5*isig*isig; dm*=-isig;
+      for(let i=0;i<d;i++){ dx[ro+i]=dY[ro+i]*gamma[i]*isig + ds*2*(x[ro+i]-m)/d + dm/d; dg[i]+=dY[ro+i]*xh[i]; db[i]+=dY[ro+i]; }
+    }
+    return dx;
+  }
+
+  // ---------- 模型 ----------
+  function createModel(o){
+    const vocab=o.vocab|0, dModel=o.dModel|0, nHeads=o.nHeads|0, dFF=o.dFF|0, nLayers=o.nLayers|0, maxLen=o.maxLen|0;
+    const dk=dModel/nHeads;
+    const rnd=mulberry32((o.seed||1)>>>0); const g=gaussFactory(rnd);
+    function rm(rows,cols,scale){ const a=new Float64Array(rows*cols); for(let i=0;i<a.length;i++) a[i]=g()*scale; return a; }
+    function ones(n){ const a=new Float64Array(n); a.fill(1); return a; }
+    const m={vocab,dModel,nHeads,dFF,nLayers,maxLen,dk,
+      tokenEmb:rm(vocab,dModel,0.5), posEmb:rm(maxLen,dModel,0.1), Wlm:rm(vocab,dModel,0.4), layers:[]};
+    for(let l=0;l<nLayers;l++) m.layers.push({
+      Wq:rm(dModel,dModel,0.12), Wk:rm(dModel,dModel,0.12), Wv:rm(dModel,dModel,0.12), Wo:rm(dModel,dModel,0.12),
+      g1:ones(dModel), b1:new Float64Array(dModel), g2:ones(dModel), b2:new Float64Array(dModel),
+      W1:rm(dFF,dModel,0.12), c1:new Float64Array(dFF), W2:rm(dModel,dFF,0.12), c2:new Float64Array(dModel)});
+    return m;
+  }
+  function zeroGrads(m){
+    const z=arr=>new Float64Array(arr.length);
+    const G={ tokenEmb:z(m.tokenEmb), posEmb:z(m.posEmb), Wlm:z(m.Wlm), layers:[] };
+    for(const L of m.layers) G.layers.push({Wq:z(L.Wq),Wk:z(L.Wk),Wv:z(L.Wv),Wo:z(L.Wo),g1:z(L.g1),b1:z(L.b1),g2:z(L.g2),b2:z(L.b2),W1:z(L.W1),c1:z(L.c1),W2:z(L.W2),c2:z(L.c2)});
+    return G;
+  }
+  function makeAdamState(m){
+    const G=zeroGrads(m); const mk=a=>({m:new Float64Array(a.length), v:new Float64Array(a.length)});
+    const S={ tokenEmb:mk(G.tokenEmb), posEmb:mk(G.posEmb), Wlm:mk(G.Wlm), layers:[] };
+    for(const l of G.layers) S.layers.push({Wq:mk(l.Wq),Wk:mk(l.Wk),Wv:mk(l.Wv),Wo:mk(l.Wo),g1:mk(l.g1),b1:mk(l.b1),g2:mk(l.g2),b2:mk(l.b2),W1:mk(l.W1),c1:mk(l.c1),W2:mk(l.W2),c2:mk(l.c2)});
+    S.t=0; return S;
+  }
+  function adamStep(m,G,S,lr){
+    S.t++; const b1=0.9,b2=0.999,eps=1e-8, tc=S.t;
+    function up(p,gp,st){ for(let i=0;i<p.length;i++){ const gi=gp[i]; st.m[i]=b1*st.m[i]+(1-b1)*gi; st.v[i]=b2*st.v[i]+(1-b2)*gi*gi; const mh=st.m[i]/(1-Math.pow(b1,tc)); const vh=st.v[i]/(1-Math.pow(b2,tc)); p[i]-=lr*mh/(Math.sqrt(vh)+eps); } }
+    up(m.tokenEmb,G.tokenEmb,S.tokenEmb); up(m.posEmb,G.posEmb,S.posEmb); up(m.Wlm,G.Wlm,S.Wlm);
+    for(let li=0;li<m.layers.length;li++){ const L=m.layers[li], gl=G.layers[li], sl=S.layers[li];
+      up(L.Wq,gl.Wq,sl.Wq); up(L.Wk,gl.Wk,sl.Wk); up(L.Wv,gl.Wv,sl.Wv); up(L.Wo,gl.Wo,sl.Wo);
+      up(L.g1,gl.g1,sl.g1); up(L.b1,gl.b1,sl.b1); up(L.g2,gl.g2,sl.g2); up(L.b2,gl.b2,sl.b2);
+      up(L.W1,gl.W1,sl.W1); up(L.c1,gl.c1,sl.c1); up(L.W2,gl.W2,sl.W2); up(L.c2,gl.c2,sl.c2); }
+  }
+
+  // ---------- 前向 ----------
+  function attentionFwd(m,a,T,L){
+    const d=m.dModel, nh=m.nHeads, dk=m.dk;
+    const Q=new Float64Array(T*d), K=new Float64Array(T*d), Vv=new Float64Array(T*d), tmp=new Float64Array(d);
+    for(let i=0;i<T;i++){ matVec(L.Wq,a.subarray(i*d,i*d+d),d,d,tmp); for(let c=0;c<d;c++) Q[i*d+c]=tmp[c]; }
+    for(let i=0;i<T;i++){ matVec(L.Wk,a.subarray(i*d,i*d+d),d,d,tmp); for(let c=0;c<d;c++) K[i*d+c]=tmp[c]; }
+    for(let i=0;i<T;i++){ matVec(L.Wv,a.subarray(i*d,i*d+d),d,d,tmp); for(let c=0;c<d;c++) Vv[i*d+c]=tmp[c]; }
+    const sq=Math.sqrt(dk), Aall=new Float64Array(nh*T*T), concat=new Float64Array(T*d), sc=new Float64Array(T*T);
+    for(let hd=0;hd<nh;hd++){ const off=hd*dk;
+      for(let i=0;i<T;i++){ for(let j=0;j<T;j++){ let s; if(j<=i){ s=0; for(let c=0;c<dk;c++) s+=Q[i*d+off+c]*K[j*d+off+c]; s/=sq; } else s=-1e18; sc[i*T+j]=s; } softmaxRow(sc,i*T,T); for(let j=0;j<T;j++) Aall[hd*T*T+i*T+j]=sc[i*T+j]; }
+      for(let i=0;i<T;i++) for(let c=0;c<dk;c++){ let s=0; for(let j=0;j<T;j++) s+=Aall[hd*T*T+i*T+j]*Vv[j*d+off+c]; concat[i*d+off+c]=s; }
+    }
+    const out=new Float64Array(T*d), orow=new Float64Array(d);
+    for(let i=0;i<T;i++){ matVec(L.Wo,concat.subarray(i*d,i*d+d),d,d,orow); for(let c=0;c<d;c++) out[i*d+c]=orow[c]; }
+    return {out,Q,K,V:Vv,Aall,concat,a,T,d,nh,dk};
+  }
+  function ffnFwd(b,T,d,dFF,L){
+    const z1=new Float64Array(T*dFF), a1=new Float64Array(T*dFF), tmp=new Float64Array(dFF);
+    for(let i=0;i<T;i++){ matVec(L.W1,b.subarray(i*d,i*d+d),dFF,d,tmp); for(let c=0;c<dFF;c++){ const z=tmp[c]+L.c1[c]; z1[i*dFF+c]=z; a1[i*dFF+c]=z>0?z:0; } }
+    const out=new Float64Array(T*d), orow=new Float64Array(d);
+    for(let i=0;i<T;i++){ matVec(L.W2,a1.subarray(i*dFF,i*dFF+dFF),d,dFF,orow); for(let c=0;c<d;c++) out[i*d+c]=orow[c]+L.c2[c]; }
+    return {out,z1,a1,b};
+  }
+  function forward(m,tokens){
+    const T=tokens.length, d=m.dModel, V=m.vocab;
+    let h=new Float64Array(T*d);
+    for(let i=0;i<T;i++){ const to=tokens[i]*d, ro=i*d; for(let c=0;c<d;c++) h[ro+c]=m.tokenEmb[to+c]+m.posEmb[ro+c]; }
+    const lc=[];
+    for(const L of m.layers){
+      const h_in=h;
+      const ln1=layernormRows(h_in,T,d,L.g1,L.b1);
+      const att=attentionFwd(m,ln1.y,T,L);
+      const hmid=new Float64Array(T*d); for(let i=0;i<T*d;i++) hmid[i]=h_in[i]+att.out[i];
+      const ln2=layernormRows(hmid,T,d,L.g2,L.b2);
+      const ffn=ffnFwd(ln2.y,T,d,m.dFF,L);
+      const hout=new Float64Array(T*d); for(let i=0;i<T*d;i++) hout[i]=hmid[i]+ffn.out[i];
+      h=hout;
+      lc.push({hin:h_in, a:ln1.y, ln1:{mu:ln1.mu,inv:ln1.inv}, att, hmid, ln2, ffn});
+    }
+    const logits=new Float64Array(T*V), orow=new Float64Array(V);
+    for(let i=0;i<T;i++){ matVec(m.Wlm, h.subarray(i*d,i*d+d), V, d, orow); for(let c=0;c<V;c++) logits[i*V+c]=orow[c]; }
+    return {logits,T,V,d,h,lc};
+  }
+  function lossFromLogits(logits,T,V,targets){
+    let L=0; const sm=new Float64Array(V);
+    for(let i=0;i<T;i++){ const off=i*V; let mx=-Infinity; for(let c=0;c<V;c++) if(logits[off+c]>mx)mx=logits[off+c]; let s=0; for(let c=0;c<V;c++){ const e=Math.exp(logits[off+c]-mx); sm[c]=e; s+=e; } L+=-Math.log(sm[targets[i]]/s); }
+    return L/T;
+  }
+
+  // ---------- 反向 ----------
+  function attentionBackward(m,att,dOut,T,L,gL){
+    const d=m.dModel, nh=m.nHeads, dk=m.dk, sq=Math.sqrt(dk);
+    const dConcat=new Float64Array(T*d), orow=new Float64Array(d);
+    for(let i=0;i<T;i++){ matVecT(L.Wo,dOut.subarray(i*d,i*d+d),d,d,orow); for(let c=0;c<d;c++) dConcat[i*d+c]=orow[c]; outerAdd(gL.Wo, dOut.subarray(i*d,i*d+d), att.concat.subarray(i*d,i*d+d), d, d); }
+    const dQ=new Float64Array(T*d), dK=new Float64Array(T*d), dV=new Float64Array(T*d);
+    for(let hd=0;hd<nh;hd++){ const off=hd*dk;
+      for(let i=0;i<T;i++) for(let c=0;c<dk;c++){ const dc=dConcat[i*d+off+c]; for(let j=0;j<T;j++) dV[j*d+off+c]+=att.Aall[hd*T*T+i*T+j]*dc; }
+      for(let i=0;i<T;i++){ let rowdot=0; for(let j=0;j<=i;j++){ let dot=0; for(let c=0;c<dk;c++) dot+=dConcat[i*d+off+c]*att.V[j*d+off+c]; rowdot+=att.Aall[hd*T*T+i*T+j]*dot; }
+        for(let j=0;j<=i;j++){ let dot=0; for(let c=0;c<dk;c++) dot+=dConcat[i*d+off+c]*att.V[j*d+off+c]; const ds=att.Aall[hd*T*T+i*T+j]*(dot-rowdot); const dsc=ds/sq;
+          for(let c=0;c<dk;c++){ dQ[i*d+off+c]+=dsc*att.K[j*d+off+c]; dK[j*d+off+c]+=dsc*att.Q[i*d+off+c]; } } }
+    }
+    for(let i=0;i<T;i++){ outerAdd(gL.Wq, dQ.subarray(i*d,i*d+d), att.a.subarray(i*d,i*d+d), d, d); outerAdd(gL.Wk, dK.subarray(i*d,i*d+d), att.a.subarray(i*d,i*d+d), d, d); outerAdd(gL.Wv, dV.subarray(i*d,i*d+d), att.a.subarray(i*d,i*d+d), d, d); }
+    const da=new Float64Array(T*d);
+    for(let i=0;i<T;i++){ matVecT(L.Wq,dQ.subarray(i*d,i*d+d),d,d,orow); for(let c=0;c<d;c++) da[i*d+c]+=orow[c]; matVecT(L.Wk,dK.subarray(i*d,i*d+d),d,d,orow); for(let c=0;c<d;c++) da[i*d+c]+=orow[c]; matVecT(L.Wv,dV.subarray(i*d,i*d+d),d,d,orow); for(let c=0;c<d;c++) da[i*d+c]+=orow[c]; }
+    return da;
+  }
+  function ffnBackward(m,L,ffn,dFfn,gL){
+    const d=m.dModel, dFF=m.dFF, Tn=ffn.z1.length/dFF;
+    const dB=new Float64Array(Tn*d), tmp=new Float64Array(dFF), tmp2=new Float64Array(d);
+    const da1=new Float64Array(Tn*dFF);
+    for(let i=0;i<Tn;i++){
+      // da1 = relu'(z1) ⊙ (W2ᵀ · dFfn)
+      matVecT(L.W2, dFfn.subarray(i*d,i*d+d), d, dFF, tmp);
+      for(let c=0;c<dFF;c++){ const z=ffn.z1[i*dFF+c]; da1[i*dFF+c]=z>0?tmp[c]:0; }
+      // dB (w.r.t. ln2.y) += W1ᵀ · da1
+      matVecT(L.W1, da1.subarray(i*dFF,i*dFF+dFF), dFF, d, tmp2);
+      for(let c=0;c<d;c++) dB[i*d+c]+=tmp2[c];
+      // 参数梯度
+      for(let c=0;c<d;c++) gL.c2[c]+=dFfn[i*d+c];
+      outerAdd(gL.W2, dFfn.subarray(i*d,i*d+d), ffn.a1.subarray(i*dFF,i*dFF+dFF), d, dFF);
+      for(let c=0;c<dFF;c++) gL.c1[c]+=da1[i*dFF+c];
+      outerAdd(gL.W1, da1.subarray(i*dFF,i*dFF+dFF), ffn.b.subarray(i*d,i*d+d), dFF, d);
+    }
+    return dB;
+  }
+  function backward(m,fwd,targets,G,tokens){
+    const T=fwd.T, V=fwd.V, d=m.dModel;
+    const dLogits=new Float64Array(T*V), sm=new Float64Array(V);
+    for(let i=0;i<T;i++){ const off=i*V; let mx=-Infinity; for(let c=0;c<V;c++) if(fwd.logits[off+c]>mx)mx=fwd.logits[off+c]; let s=0; for(let c=0;c<V;c++){ const e=Math.exp(fwd.logits[off+c]-mx); sm[c]=e; s+=e; } for(let c=0;c<V;c++) dLogits[off+c]=(sm[c]/s-(c===targets[i]?1:0))/T; }
+    const dH=new Float64Array(T*d), tmp=new Float64Array(d);
+    for(let i=0;i<T;i++){ outerAdd(G.Wlm, dLogits.subarray(i*V,i*V+V), fwd.h.subarray(i*d,i*d+d), V, d); matVecT(m.Wlm, dLogits.subarray(i*V,i*V+V), V, d, tmp); for(let c=0;c<d;c++) dH[i*d+c]+=tmp[c]; }
+  let dHin=dH;
+  for(let li=m.layers.length-1; li>=0; li--){
+      const L=m.layers[li], gL=G.layers[li], lc=fwd.lc[li];
+      const dHmid=new Float64Array(T*d); for(let i=0;i<T*d;i++) dHmid[i]=dHin[i];
+      const dB=ffnBackward(m,L,lc.ffn,dHmid,gL);
+      const dHmid2=layernormBackward(lc.hmid,L.g2,d, dB, T, lc.ln2.mu, lc.ln2.inv, gL.g2, gL.b2);
+      for(let i=0;i<T*d;i++) dHmid[i]+=dHmid2[i];
+      const da=attentionBackward(m,lc.att,dHmid,T,L,gL);
+      const dXin=layernormBackward(lc.hin, L.g1, d, da, T, lc.ln1.mu, lc.ln1.inv, gL.g1, gL.b1);
+    const dLayerIn=new Float64Array(T*d); for(let i=0;i<T*d;i++) dLayerIn[i]=dXin[i]+dHmid[i];
+    dHin=dLayerIn;
+  }
+  for(let i=0;i<T;i++){ const to=tokens[i]*d, ro=i*d; for(let c=0;c<d;c++){ G.tokenEmb[to+c]+=dHin[i*d+c]; G.posEmb[ro+c]+=dHin[i*d+c]; } }
+  return dLogits;
+  }
+
+  // ---------- 数据 ----------
+  function makeDataset(task,vocab,T,n,seed){
+    const rnd=mulberry32((seed||7)>>>0); const X=[],Y=[];
+    for(let s=0;s<n;s++){ const x=new Array(T), y=new Array(T); for(let i=0;i<T;i++) x[i]=(rnd()*vocab)|0;
+      if(task==='copy'){ for(let i=0;i<T;i++) y[i]=x[i]; }
+      else { y[0]=0; for(let i=1;i<T;i++) y[i]=x[i-1]; }
+      X.push(x); Y.push(y);
+    }
+    return {X,Y,task,vocab,T};
+  }
+  function accuracy(m,ds){
+    let ok=0,tot=0;
+    for(let s=0;s<ds.X.length;s++){ const fwd=forward(m,ds.X[s]); const V=ds.vocab;
+      for(let i=0;i<ds.T;i++){ let best=0,bv=-1e9; const off=i*V; for(let c=0;c<V;c++) if(fwd.logits[off+c]>bv){bv=fwd.logits[off+c];best=c;} if(best===ds.Y[s][i])ok++; tot++; } }
+    return ok/tot;
+  }
+  function attentionMatrix(m,tokens,Lidx){
+    const fwd=forward(m,tokens); const att=fwd.lc[Lidx||0].att; const T=tokens.length; const A=new Float64Array(T*T);
+    for(let i=0;i<T;i++) for(let j=0;j<T;j++) A[i*T+j]=att.Aall[i*T+j];
+    return A;
+  }
+
+  // ---------- 训练 ----------
+  function train(o){
+    const vocab=o.vocab|0, T=o.T|0, dModel=o.dModel|0, nHeads=o.nHeads|0, dFF=o.dFF|0, nLayers=o.nLayers|0;
+    const steps=o.steps|0, batch=o.batch||32, lr=o.lr||0.01, seed=o.seed||1, task=o.task||'shift';
+    const m=createModel({vocab,dModel,nHeads,dFF,nLayers,maxLen:T+4,seed});
+    const trainDS=makeDataset(task,vocab,T,Math.max(800,batch*40),seed);
+    const testDS=makeDataset(task,vocab,T,200,(seed^0x55)+1);
+    const S=makeAdamState(m); const g=mulberry32((seed*7+3)>>>0);
+    const lossCurve=[];
+    for(let step=0;step<steps;step++){
+      const G=zeroGrads(m); let totL=0;
+      for(let k=0;k<batch;k++){ const idx=(g()*trainDS.X.length)|0; const tokens=trainDS.X[idx]; const fwd=forward(m,tokens); const L=lossFromLogits(fwd.logits,T,vocab,trainDS.Y[idx]); totL+=L; backward(m,fwd,trainDS.Y[idx],G,tokens); }
+      const scale=1/batch;
+      for(const key of ['tokenEmb','posEmb','Wlm']){ const gp=G[key]; for(let i=0;i<gp.length;i++) gp[i]*=scale; }
+      for(const l of G.layers) for(const key in l){ const gp=l[key]; for(let i=0;i<gp.length;i++) gp[i]*=scale; }
+      adamStep(m,G,S,lr);
+      lossCurve.push(totL/batch);
+    }
+    const acc=accuracy(m,testDS);
+    return {model:m, lossCurve, accuracy:acc, config:{vocab,dModel,nHeads,dFF,nLayers,T,task,steps}, testDS};
+  }
+
+  globalThis.TRF={ mulberry32, gaussFactory, createModel, zeroGrads, makeAdamState, adamStep,
+    forward, attentionFwd, ffnFwd, attentionBackward, layernormRows, layernormBackward, ffnBackward, backward,
+    lossFromLogits, makeDataset, accuracy, attentionMatrix, train, matVec, outerAdd, softmaxRow };
+})();
+</script>
+<script id="ui">
+(function(){
+  if (typeof document === "undefined") return;
+  const TRF=globalThis.TRF;
+  const $=id=>document.getElementById(id);
+  const cv=$("cv"), ctx=cv.getContext("2d");
+  const pct=x=>(x*100).toFixed(1)+"%";
+  function runSelftest(){
+    const out=[]; let pass=0, fail=0;
+    const ok=(n,c,info)=>{ if(c)pass++; else fail++; out.push((c?"PASS":"FAIL")+" "+n+(info?"  ("+info+")":"")); };
+    const m=TRF.createModel({vocab:4,dModel:12,nHeads:3,dFF:24,nLayers:1,maxLen:16,seed:11});
+    const fwd=TRF.forward(m,[0,1,2,3,1,0]); const att=fwd.lc[0].att; const T=6;
+    let smOK=true, maskOK=true;
+    for(let i=0;i<T;i++){ let s=0; for(let j=0;j<T;j++){ const a=att.Aall[i*T+j]; s+=a; if(j>i && a>1e-9) maskOK=false; } if(Math.abs(s-1)>1e-9) smOK=false; }
+    ok("softmax 行和=1", smOK); ok("因果掩码(上三角=0)", maskOK);
+    // 梯度检验（LN + MHA + FFN + 交叉熵）
+    const gcm=TRF.createModel({vocab:3,dModel:6,nHeads:2,dFF:8,nLayers:1,maxLen:8,seed:5});
+    const toks=[0,1,2,0], tgt=[0,0,1,2];
+    const lossOf=model=>{ const f=TRF.forward(model,toks); return TRF.lossFromLogits(f.logits,4,3,tgt); };
+    const G=TRF.zeroGrads(gcm); const f0=TRF.forward(gcm,toks); TRF.backward(gcm,f0,tgt,G,toks);
+    const params=[], names=[], gps=[];
+    const collect=(arr,nm,gp)=>{ params.push(arr); names.push(nm); gps.push(gp); };
+    collect(gcm.tokenEmb,"tok",G.tokenEmb); collect(gcm.posEmb,"pos",G.posEmb); collect(gcm.Wlm,"Wlm",G.Wlm);
+    const L=gcm.layers[0], GL=G.layers[0];
+    collect(L.Wq,"Wq",GL.Wq); collect(L.Wk,"Wk",GL.Wk); collect(L.Wv,"Wv",GL.Wv); collect(L.Wo,"Wo",GL.Wo);
+    collect(L.g1,"g1",GL.g1); collect(L.b1,"b1",GL.b1); collect(L.g2,"g2",GL.g2); collect(L.b2,"b2",GL.b2);
+    collect(L.W1,"W1",GL.W1); collect(L.c1,"c1",GL.c1); collect(L.W2,"W2",GL.W2); collect(L.c2,"c2",GL.c2);
+    const eps=1e-5; let maxRel=0, worst="";
+    for(let p=0;p<params.length;p++){ const P=params[p], dP=gps[p];
+      for(let idx=0; idx<P.length; idx+=3){
+        const orig=P[idx]; P[idx]=orig+eps; const lp=lossOf(gcm); P[idx]=orig-eps; const lm=lossOf(gcm); P[idx]=orig;
+        const num=(lp-lm)/(2*eps), ana=dP[idx]; const rel=Math.abs(num-ana)/(Math.abs(num)+Math.abs(ana)+1e-9);
+        if(rel>maxRel){ maxRel=rel; worst=names[p]+"["+idx+"]"; }
+      }
+    }
+    ok("梯度检验 (解析≈数值)", maxRel<1e-5, "maxRel="+maxRel.toExponential(2)+" @ "+worst);
+    // 嵌入装配不变量：h[i] = tokenEmb[token_i] + posEmb[i]（位置编码下模型非置换等变，故校验装配本身）
+    const m2=TRF.createModel({vocab:4,dModel:8,nHeads:2,dFF:16,nLayers:1,maxLen:16,seed:3});
+    const inA=[0,1,2,3]; const fA=TRF.forward(m2,inA); let embOK=true;
+    for(let i=0;i<4;i++) for(let c=0;c<8;c++){ const exp=m2.tokenEmb[inA[i]*8+c]+m2.posEmb[i*8+c]; if(Math.abs(fA.lc[0].hin[i*8+c]-exp)>1e-9) embOK=false; }
+    ok("嵌入装配 h_in[i]=tokenEmb[token_i]+posEmb[i]", embOK);
+    // 训练后 shift 精度
+    const tm=TRF.train({vocab:4,T:8,dModel:20,nHeads:4,dFF:40,nLayers:1,steps:1200,batch:32,lr:0.01,seed:42,task:'shift'});
+    ok("训练收敛(loss下降)", tm.lossCurve[tm.lossCurve.length-1] < tm.lossCurve[0]*0.8, "loss "+tm.lossCurve[0].toFixed(3)+"→"+tm.lossCurve[tm.lossCurve.length-1].toFixed(3));
+    ok("shift 测试精度≥95%", tm.accuracy>=0.95, pct(tm.accuracy));
+    out.push(""); out.push(pass+" / "+(pass+fail)+(fail?"  FAIL":"  ALL GREEN"));
+    return {text:out.join("\n"), train:tm};
+  }
+  function drawHeat(A,T){
+    ctx.clearRect(0,0,cv.width,cv.height); const pad=28, W=cv.width-pad-8, H=cv.height-pad-8; const cs=Math.min(W/T,H/T);
+    ctx.font="11px sans-serif"; ctx.fillStyle="#6b7280";
+    for(let i=0;i<T;i++) for(let j=0;j<T;j++){ const v=A[i*T+j]; const x=pad+j*cs, y=pad+i*cs;
+      ctx.fillStyle="rgb("+Math.round(255-220*v)+","+Math.round(255-200*v)+","+Math.floor(255-120*v)+")"; ctx.fillRect(x,y,cs-1,cs-1); }
+    ctx.fillStyle="#1f2330"; for(let i=0;i<T;i++){ ctx.fillText("q"+i,4,pad+i*cs+cs/2+4); ctx.fillText("k"+i,pad+i*cs+cs/2-2,cv.height-12); }
+  }
+  function trainUI(){
+    const task=$("inpTask").value, vocab=+$("inpVocab").value, T=+$("inpT").value, d=+$("inpD").value,
+      L=+$("inpL").value, steps=+$("inpSteps").value, nHeads=Math.max(1,Math.floor(d/(d>=12?5:3)));
+    $("btnTrain").disabled=true; $("stat").textContent="训练中…";
+    const st=runSelftest(); const tm=st.train;
+    $("loss").textContent=tm.lossCurve[tm.lossCurve.length-1].toFixed(3);
+    $("acc").textContent=pct(tm.accuracy); $("step").textContent=steps; $("stepTot").textContent=steps;
+    $("selftest").textContent=st.text;
+    const ds=tm.testDS, sample=ds.X[0], fwd=TRF.forward(tm.model,sample), att=fwd.lc[0].att, TT=sample.length;
+    const A=new Float64Array(TT*TT); for(let i=0;i<TT;i++) for(let j=0;j<TT;j++) A[i*TT+j]=att.Aall[i*TT+j];
+    drawHeat(A,TT);
+    let html="<table><tr><th>pos</th>"; for(let i=0;i<TT;i++) html+="<th>i"+i+"</th>"; html+="</tr><tr><td>输入</td>";
+    for(let i=0;i<TT;i++) html+="<td>"+sample[i]+"</td>"; html+="</tr><tr><td>目标</td>";
+    for(let i=0;i<TT;i++) html+="<td>"+ds.Y[0][i]+"</td>"; html+="</tr><tr><td>预测</td>";
+    for(let i=0;i<TT;i++){ let best=0,bv=-1e9; for(let c=0;c<vocab;c++) if(fwd.logits[i*vocab+c]>bv){bv=fwd.logits[i*vocab+c];best=c;} const right=best===ds.Y[0][i]; html+="<td class='"+(right?"ok":"warn")+"'>"+best+"</td>"; }
+    html+="</tr></table>";
+    $("predTable").innerHTML=html;
+    $("stat").textContent="完成 · 测试精度 "+pct(tm.accuracy);
+    $("btnTrain").disabled=false;
+  }
+  function demoUI(){
+    const task=$("inpTask").value, vocab=+$("inpVocab").value, T=+$("inpT").value, d=+$("inpD").value, nHeads=Math.max(1,Math.floor(d/(d>=12?5:3)));
+    const tm=TRF.train({vocab,T,dModel:d,nHeads,dFF:d*2,nLayers:1,steps:1000,batch:32,lr:0.01,seed:42,task});
+    const ds=tm.testDS, sample=ds.X[0], fwd=TRF.forward(tm.model,sample), att=fwd.lc[0].att, TT=sample.length;
+    const A=new Float64Array(TT*TT); for(let i=0;i<TT;i++) for(let j=0;j<TT;j++) A[i*TT+j]=att.Aall[i*TT+j];
+    drawHeat(A,TT); $("stat").textContent="注意力演示 · 精度 "+pct(tm.accuracy);
+  }
+  $("btnTrain").addEventListener("click",trainUI);
+  $("btnDemo").addEventListener("click",demoUI);
+})();
+</script>
+</body>
+</html>

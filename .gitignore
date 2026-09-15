@@ -1,0 +1,6 @@
+# 本地诊断/自检产物
+_*.log
+_probe.txt
+_*.json
+node_modules/
+.DS_Store
