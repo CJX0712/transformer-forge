@@ -1,5 +1,12 @@
 # transformer-forge · 从零手写的 mini-Transformer / GPT 实验室
 
+<p align="center">
+  <a href="https://github.com/CJX0712/transformer-forge/actions/workflows/ci.yml"><img src="https://github.com/CJX0712/transformer-forge/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://github.com/CJX0712/transformer-forge/releases"><img src="https://img.shields.io/github/v/release/CJX0712/transformer-forge?sort=semver" alt="release"></a>
+  <a href="https://github.com/CJX0712/transformer-forge/blob/main/LICENSE"><img src="https://img.shields.io/github/license/CJX0712/transformer-forge" alt="license"></a>
+  <img src="https://img.shields.io/badge/author-%E6%99%A8%E6%98%9F-1f6feb" alt="author">
+</p>
+
 > forge 系列 #14 — 零依赖、可在浏览器内训练、可在 Node 无头自检的因果 Transformer。
 
 不是调包，不是「调用 `torch.nn.Transformer`」。从矩阵乘、LayerNorm、因果多头注意力、FFN 到 Adam，
